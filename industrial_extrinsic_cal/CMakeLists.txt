@@ -4,7 +4,7 @@ project(industrial_extrinsic_cal)
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
-find_package(catkin REQUIRED COMPONENTS roscpp std_msgs)
+find_package(catkin REQUIRED COMPONENTS roscpp std_msgs rosconsole)
 
 # Ceres
 FIND_PACKAGE(Ceres REQUIRED)
@@ -63,7 +63,7 @@ ENDIF (EIGEN_FOUND)
 catkin_package(
    INCLUDE_DIRS include
 #  LIBRARIES industrial_extrinsic_cal
-#  CATKIN_DEPENDS roscpp std_msg
+   CATKIN_DEPENDS roscpp std_msgs rosconsole
 #  DEPENDS system_lib
 )
 
@@ -81,22 +81,22 @@ include_directories(include
 # add_library(industrial_extrinsic_cal
 #   src/${PROJECT_NAME}/industrial_extrinsic_cal.cpp
 # )
+add_library(industrial_extrinsic_cal src/calibration_job.cpp)
 
 ## Declare a cpp executable
 # add_executable(industrial_extrinsic_cal_node src/industrial_extrinsic_cal_node.cpp)
 add_executable(mono_ex_cal src/mono_ex_cal.cpp)
-add_executable(cal_job src/calibration_job.cpp)
+add_executable(cal_job src/test_cal_job.cpp)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
 # add_dependencies(industrial_extrinsic_cal_node industrial_extrinsic_cal_generate_messages_cpp)
 
 ## Specify libraries to link a library or executable target against
-# target_link_libraries(industrial_extrinsic_cal_node
-#   ${catkin_LIBRARIES}
-# )
+target_link_libraries(industrial_extrinsic_cal yaml-cpp ${catkin_LIBRARIES})
+
 target_link_libraries(mono_ex_cal ${CERES_LIBRARIES} )
-target_link_libraries(cal_job ${CERES_LIBRARIES} yaml-cpp )
+target_link_libraries(cal_job industrial_extrinsic_cal ${CERES_LIBRARIES})
 
 #############
 ## Install ##
