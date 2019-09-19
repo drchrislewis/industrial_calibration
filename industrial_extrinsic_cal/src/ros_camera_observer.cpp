@@ -778,12 +778,12 @@ void ROSCameraObserver::dynReConfCallBack(industrial_extrinsic_cal::circle_grid_
   circle_params.thresholdStep = 10;
   circle_params.minThreshold = config.min_threshold;
   circle_params.maxThreshold = config.max_threshold;
-  circle_params.minRepeatability = 2;
+  circle_params.minRepeatability = config.min_repeatability;
   circle_params.minDistBetweenCircles = config.min_distance;
-  circle_params.minRadiusDiff = 10;
+  circle_params.minRadiusDiff = config.min_radius_diff;
 
-  circle_params.filterByColor = false;
-  if (white_blobs_) circle_params.circleColor = 200;
+  circle_params.filterByColor = config.filter_by_color;
+  if (white_blobs_) circle_params.circleColor = 255;
   if (!white_blobs_) circle_params.circleColor = 0;
 
   circle_params.filterByArea = config.filter_by_area;
@@ -808,11 +808,11 @@ void ROSCameraObserver::dynReConfCallBack(industrial_extrinsic_cal::circle_grid_
   blob_params.thresholdStep = 10;
   blob_params.minThreshold = config.min_threshold;
   blob_params.maxThreshold = config.max_threshold;
-  blob_params.minRepeatability = 2;
+  blob_params.minRepeatability = config.min_repeatability;
   blob_params.minDistBetweenBlobs = config.min_distance;
 
   blob_params.filterByColor = true;
-  if (white_blobs_) blob_params.blobColor = 200;
+  if (white_blobs_) blob_params.blobColor = 255;
   if (!white_blobs_) blob_params.blobColor = 0;
 
   blob_params.filterByArea = config.filter_by_area;
@@ -833,5 +833,9 @@ void ROSCameraObserver::dynReConfCallBack(industrial_extrinsic_cal::circle_grid_
   blob_detector_ptr_ = cv::SimpleBlobDetector::create(blob_params);
 }
 
+bool ROSCameraObserver::checkObservationProclivity(CameraObservations& CO)
+{
+  return CameraObserver::checkObservationProclivity(CO);
+}
 
 }  // industrial_extrinsic_cal
