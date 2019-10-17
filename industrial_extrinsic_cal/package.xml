@@ -36,9 +36,14 @@
   <depend>libceres-dev</depend>
   <depend>pcl_ros</depend>
   <depend>pcl_conversions</depend>
+  <!--
   <depend>tesseract_monitoring</depend>
   <depend>tesseract_motion_planners</depend>
   <depend>tesseract_rosutils</depend>
+  <depend>tesseract_collision</depend>
+-->
+  <depend>ompl</depend>
+
   <build_depend>boost</build_depend>
   <build_depend>message_generation</build_depend>
 
@@ -49,6 +54,7 @@
   <exec_depend>openni2_launch</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz</exec_depend>
+
 
   <test_depend>rosunit</test_depend>
 
