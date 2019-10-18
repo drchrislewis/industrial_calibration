@@ -1,7 +1,12 @@
 <launch>
   <arg name="image_directory" default="/home/clewis/astra_ical_data/ir"/>
- 
-  <include  file="$(find astra_launch)/launch/astra.launch" />
+  <arg name="use_astra_launch" default="true"/>
+
+  <!-- In version 0.3.0 of the astra driver, astra_launch was combined into astra_camera.
+       Set use_astra_launch = false if you are using the combined version. (The debian in
+       Ubuntu 16.04 keeps them separate.)  -->
+  <include if="$(arg use_astra_launch)" file="$(find astra_launch)/launch/astra.launch"/>
+  <include unless="$(arg use_astra_launch)" file="$(find astra_camera)/launch/astra.launch"/>
 
   <node pkg="intrinsic_cal" type="robocyl_ical_8D" name="robocyl_intrinsic_calibration" output="screen" >
           <param name="target_rows" value="20" />
