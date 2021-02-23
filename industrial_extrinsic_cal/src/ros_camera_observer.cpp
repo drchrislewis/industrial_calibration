@@ -19,6 +19,8 @@
 #include <industrial_extrinsic_cal/ros_camera_observer.h>
 #include <industrial_extrinsic_cal/circle_detector.hpp>
 #include <image_transport/image_transport.h>
+#include <boost/thread/locks.hpp>
+
 #define MODIFIED_CIRCLE_SIZE_RATIO (0.10)
 using cv::CircleDetector;
 namespace industrial_extrinsic_cal
@@ -32,13 +34,12 @@ ROSCameraObserver::ROSCameraObserver(const std::string& camera_topic, const std:
   , load_observation_images_(false)
   , normalize_calibration_image_(false)
   , image_number_(0)
-
 {
   camera_name_ = camera_name;
   new_image_collected_ = false;
   image_topic_ = camera_topic;
   ros::NodeHandle pnh("~");
-  results_pub_ = nh_.advertise<sensor_msgs::Image>(camera_name_+"/observer_results_image", 100);
+  results_pub_ = nh_.advertise<sensor_msgs::Image>(camera_name_ + "/observer_results_image", 100);
   debug_pub_ = nh_.advertise<sensor_msgs::Image>("observer_raw_image", 100);
   std::string set_camera_info_service = camera_name_ + "/set_camera_info";
   client_ = nh_.serviceClient<sensor_msgs::SetCameraInfo>(set_camera_info_service);
@@ -73,6 +74,30 @@ ROSCameraObserver::ROSCameraObserver(const std::string& camera_topic, const std:
   server_->setCallback(f);
 }
 
+void ROSCameraObserver::startTargetTrack()
+{
+  // subscribe directly to the image topic and observe targets in every image
+  image_sub_ = nh_.subscribe(image_topic_, 5, &ROSCameraObserver::imageCB, this);
+}
+
+void ROSCameraObserver::stopTargetTrack()
+{
+  image_sub_.shutdown();
+}
+
+void ROSCameraObserver::imageCB(const sensor_msgs::Image& image)
+{
+  cv_bridge::CvImagePtr bridge = cv_bridge::toCvCopy(image, image.encoding);
+  debug_pub_.publish(bridge->toImageMsg());
+  //  setCurrentImage(bridge->image);
+
+  input_bridge_ = cv_bridge::toCvCopy(image, "mono8");
+  output_bridge_ = cv_bridge::toCvCopy(image, "bgr8");
+  last_raw_image_ = output_bridge_->image.clone();
+  out_bridge_ = cv_bridge::toCvCopy(image, "mono8");
+  new_image_collected_ = true;
+}
+
 bool ROSCameraObserver::addTarget(boost::shared_ptr<Target> targ, Roi& roi, Cost_function cost_type)
 {
   // TODO make a list of targets so that the camera may make more than one set of observations at a time
@@ -103,7 +128,8 @@ bool ROSCameraObserver::addTarget(boost::shared_ptr<Target> targ, Roi& roi, Cost
       sym_circle_ = targ->circle_grid_parameters_.is_symmetric;
       break;
     default:
-      ROS_ERROR_STREAM("target_type does not correlate to a known pattern option (Chessboard, CircleGrid, ModifiedCircleGrid)");
+      ROS_ERROR_STREAM("target_type does not correlate to a known pattern option (Chessboard, CircleGrid, "
+                       "ModifiedCircleGrid)");
       return false;
       break;
   }
@@ -128,28 +154,35 @@ void ROSCameraObserver::clearObservations()
   new_image_collected_ = false;
 }
 
-void ROSCameraObserver::setCurrentImage(const cv::Mat &image)
+void ROSCameraObserver::setCurrentImage(const cv::Mat& image)
 {
   // TODO pass the color image, and convert to mono where necessar
 
-  last_raw_image_       = image.clone();
+  last_raw_image_ = image.clone();
   std::string encoding = "mono8";
   std_msgs::Header header;
-  if(!input_bridge_){
-    input_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header,encoding,image));
-  }
-  encoding = "bgr8";
-  if(!output_bridge_){
-    output_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header, encoding, image));
-  }
-  encoding = "mono8";
-  if(!out_bridge_){
-    out_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header,encoding,image));
-  }
-  output_bridge_->image = image.clone();
-  input_bridge_ ->image = image.clone();
-  out_bridge_   ->image = image.clone();
-  new_image_collected_ = true;
+  {
+    boost::lock_guard<boost::mutex> lock(image_lock_);
+
+    if (!input_bridge_)
+    {
+      input_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header, encoding, image));
+    }
+    encoding = "bgr8";
+    if (!output_bridge_)
+    {
+      output_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header, encoding, image));
+    }
+    encoding = "mono8";
+    if (!out_bridge_)
+    {
+      out_bridge_ = cv_bridge::CvImagePtr(new cv_bridge::CvImage(header, encoding, image));
+    }
+    output_bridge_->image = image.clone();
+    input_bridge_->image = image.clone();
+    out_bridge_->image = image.clone();
+    new_image_collected_ = true;
+  }  // end of image_lock_ mutex
 }
 
 int ROSCameraObserver::getObservations(CameraObservations& cam_obs)
@@ -157,40 +190,41 @@ int ROSCameraObserver::getObservations(CameraObservations& cam_obs)
   bool successful_find = false;
   bool flipped_successful_find = false;
 
-  if (input_bridge_->image.cols < input_roi_.width || input_bridge_->image.rows < input_roi_.height)
-  {
-    ROS_ERROR("ROI too big for image size ( image = %d by %d roi= %d %d )", input_bridge_->image.cols,
-              input_bridge_->image.rows, input_roi_.width, input_roi_.height);
-    return 0;
-  }
-  ROS_DEBUG("roi size = %d %d", input_roi_.height, input_roi_.width);
-  ROS_DEBUG("image size = %d %d", input_bridge_->image.rows, input_bridge_->image.cols);
-  image_roi_ = input_bridge_->image(input_roi_);
+  {  // mutex protected area
+    boost::lock_guard<boost::mutex> lock(image_lock_);
+    if (input_bridge_->image.cols < input_roi_.width || input_bridge_->image.rows < input_roi_.height)
+    {
+      ROS_ERROR("ROI too big for image size ( image = %d by %d roi= %d %d )", input_bridge_->image.cols,
+                input_bridge_->image.rows, input_roi_.width, input_roi_.height);
+      return 0;
+    }
+    ROS_DEBUG("roi size = %d %d", input_roi_.height, input_roi_.width);
+    ROS_DEBUG("image size = %d %d", input_bridge_->image.rows, input_bridge_->image.cols);
+    image_roi_ = input_bridge_->image(input_roi_);
 
-  // Do a min/max normalization for maximum contrast
-  // input_bridge_ is known to be a mono8 image (max = 255)
-  if (normalize_calibration_image_)
-  {
-    cv::Mat norm_img = image_roi_.clone();
-    cv::normalize(image_roi_, norm_img, 0, 255, cv::NORM_MINMAX);
-    image_roi_ = norm_img;
-  }
-
-  ROS_DEBUG("image_roi_ size = %d %d", image_roi_.rows, image_roi_.cols);
+    // Do a min/max normalization for maximum contrast
+    // input_bridge_ is known to be a mono8 image (max = 255)
+    if (normalize_calibration_image_)
+    {
+      cv::Mat norm_img = image_roi_.clone();
+      cv::normalize(image_roi_, norm_img, 0, 255, cv::NORM_MINMAX);
+      image_roi_ = norm_img;
+    }
+  }  // end mutex protected area
   observation_pts_.clear();
   std::vector<cv::KeyPoint> key_points;
   ROS_DEBUG("Pattern type %d, rows %d, cols %d", pattern_, pattern_rows_, pattern_cols_);
 
   cv::Point large_point;
   cv::Size pattern_size(pattern_cols_, pattern_rows_);  // note they use cols then rows for some unknown reason
-  int start_1st_row           = 0;
-  int start_1st_row_neighbor  = 1;
-  int end_1st_row             = pattern_cols_ - 1;
-  int end_1st_row_neighbor    = pattern_cols_ - 2;
-  int start_last_row          = pattern_rows_ * pattern_cols_ - pattern_cols_;
+  int start_1st_row = 0;
+  int start_1st_row_neighbor = 1;
+  int end_1st_row = pattern_cols_ - 1;
+  int end_1st_row_neighbor = pattern_cols_ - 2;
+  int start_last_row = pattern_rows_ * pattern_cols_ - pattern_cols_;
   int start_last_row_neighbor = pattern_rows_ * pattern_cols_ - pattern_cols_ + 1;
-  int end_last_row            = pattern_rows_ * pattern_cols_ - 1;
-  int end_last_row_neighbor   = pattern_rows_ * pattern_cols_ - 2;
+  int end_last_row = pattern_rows_ * pattern_cols_ - 1;
+  int end_last_row_neighbor = pattern_rows_ * pattern_cols_ - 2;
 
   cv::Size pattern_size_flipped(pattern_rows_, pattern_cols_);  // note they use cols then rows for some unknown reason
   switch (pattern_)
@@ -312,49 +346,54 @@ int ROSCameraObserver::getObservations(CameraObservations& cam_obs)
         int temp_cols = flipped_successful_find ? pattern_rows_ : pattern_cols_;
 
         // determine which circle is the largest,
-        double start_last_row_size    = -1.0;
-        double start_1st_row_size     = -1.0;
-        double end_1st_row_size       = -1.0;
-        double end_last_row_size      = -1.0;
-	double start_last_row_n_size  = -1.0;
-	double start_1st_row_n_size   = -1.0;
-	double end_1st_row_n_size     = -1.0;
-	double end_last_row_n_size    = -1.0;
+        double start_last_row_size = -1.0;
+        double start_1st_row_size = -1.0;
+        double end_1st_row_size = -1.0;
+        double end_last_row_size = -1.0;
+        double start_last_row_n_size = -1.0;
+        double start_1st_row_n_size = -1.0;
+        double end_1st_row_n_size = -1.0;
+        double end_last_row_n_size = -1.0;
 
         for (int i = 0; i < (int)keypoints.size(); i++)
-	  {
-	    double x = keypoints[i].pt.x;
-	    double y = keypoints[i].pt.y;
-	    double ksize = keypoints[i].size;
-	    if (x == centers[start_last_row].x && y == centers[start_last_row].y) start_last_row_size = ksize;
-	    if (x == centers[end_last_row].x && y == centers[end_last_row].y) end_last_row_size = ksize;
-	    if (x == centers[start_1st_row].x && y == centers[start_1st_row].y) start_1st_row_size = ksize;
-	    if (x == centers[end_1st_row].x && y == centers[end_1st_row].y) end_1st_row_size = ksize;
-	    if (x == centers[start_last_row_neighbor].x && y == centers[start_last_row_neighbor].y) start_last_row_n_size = ksize;
-	    if (x == centers[end_last_row_neighbor].x   && y == centers[end_last_row_neighbor].y)   end_last_row_n_size   = ksize;
-	    if (x == centers[start_1st_row_neighbor].x  && y == centers[start_1st_row_neighbor].y)  start_1st_row_n_size  = ksize;
-	    if (x == centers[end_1st_row_neighbor].x    && y == centers[end_1st_row_neighbor].y)    end_1st_row_n_size    = ksize;
-	  }
+        {
+          double x = keypoints[i].pt.x;
+          double y = keypoints[i].pt.y;
+          double ksize = keypoints[i].size;
+          if (x == centers[start_last_row].x && y == centers[start_last_row].y) start_last_row_size = ksize;
+          if (x == centers[end_last_row].x && y == centers[end_last_row].y) end_last_row_size = ksize;
+          if (x == centers[start_1st_row].x && y == centers[start_1st_row].y) start_1st_row_size = ksize;
+          if (x == centers[end_1st_row].x && y == centers[end_1st_row].y) end_1st_row_size = ksize;
+          if (x == centers[start_last_row_neighbor].x && y == centers[start_last_row_neighbor].y)
+            start_last_row_n_size = ksize;
+          if (x == centers[end_last_row_neighbor].x && y == centers[end_last_row_neighbor].y)
+            end_last_row_n_size = ksize;
+          if (x == centers[start_1st_row_neighbor].x && y == centers[start_1st_row_neighbor].y)
+            start_1st_row_n_size = ksize;
+          if (x == centers[end_1st_row_neighbor].x && y == centers[end_1st_row_neighbor].y) end_1st_row_n_size = ksize;
+        }
 
-        ROS_DEBUG("start_last_row  %f %f %f", centers[start_last_row].x, centers[start_last_row].y, start_last_row_size);
+        ROS_DEBUG("start_last_row  %f %f %f", centers[start_last_row].x, centers[start_last_row].y,
+                  start_last_row_size);
         ROS_DEBUG("end_last_row %f %f %f", centers[end_last_row].x, centers[end_last_row].y, end_last_row_size);
         ROS_DEBUG("start_1st_row %f %f %f", centers[start_1st_row].x, centers[start_1st_row].y, start_1st_row_size);
         ROS_DEBUG("end_1st_row %f %f %f", centers[end_1st_row].x, centers[end_1st_row].y, end_1st_row_size);
         if (start_last_row_size < 0.0 || start_1st_row_size < 0.0 || end_1st_row_size < 0.0 || end_last_row_size < 0.0)
-	  {
-	    ROS_ERROR("No keypoint match for one or more corners");
-	    return (false);
-	  }
-        if (start_last_row_n_size < 0.0 || start_1st_row_n_size < 0.0 || end_1st_row_n_size < 0.0 || end_last_row_n_size < 0.0)
-	  {
-	    ROS_ERROR("No keypoint match for one or more corner neigbors");
-	    return (false);
-	  }
+        {
+          ROS_ERROR("No keypoint match for one or more corners");
+          return (false);
+        }
+        if (start_last_row_n_size < 0.0 || start_1st_row_n_size < 0.0 || end_1st_row_n_size < 0.0 ||
+            end_last_row_n_size < 0.0)
+        {
+          ROS_ERROR("No keypoint match for one or more corner neigbors");
+          return (false);
+        }
 
         // determine if ordering is usual by computing cross product of two vectors normal ordering has z axis positive
         // in cross
         bool usual_ordering =
-											      true;  // the most common ordering is with points going from left to right then top to bottom
+            true;  // the most common ordering is with points going from left to right then top to bottom
         double v1x, v1y, v2x, v2y;
         v1x = centers[end_last_row].x - centers[start_last_row].x;
         v1y = -centers[end_last_row].y + centers[start_last_row].y;  // reverse because y is positive going down
@@ -362,134 +401,134 @@ int ROSCameraObserver::getObservations(CameraObservations& cam_obs)
         v2y = -centers[end_1st_row].y + centers[end_last_row].y;
         double cross = v1x * v2y - v1y * v2x;
         if (cross < 0.0)
-	  {
-	    usual_ordering = false;
-	  }
+        {
+          usual_ordering = false;
+        }
         observation_pts_.clear();
 
         // largest circle at start of last row
         //       ......   This is a simple picture of the grid with the largest circle indicated by the letter o
         //       o....
-	if((start_last_row_size - start_last_row_n_size) / start_last_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
-	  {
-	    ROS_DEBUG("large circle at start of last row");
-	    large_point.x = centers[start_last_row].x;
-	    large_point.y = centers[start_last_row].y;
-	    if (usual_ordering)
-	      {  // right side up, no rotation, order is natural, starting from upper left, reads like book
-		for (int i = 0; i < (int)centers.size(); i++)
-		  observation_pts_.push_back(centers[i]);
-	      }
-	    else
-	      {  // unusual ordering 99 89 87 86...9 then 98 88 78... 8 
-		for (int c = temp_cols - 1; c >= 0; c--)
-		  {
-		    for (int r = temp_rows - 1; r >= 0; r--)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }  // end unusual ordering
-	  }    // end largest circle at start
-        // largest circle at end of 1st row
-        //       .....o
-        //       ......
-	else if( (end_1st_row_size - end_1st_row_n_size) / end_1st_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
-	  {
-	    ROS_DEBUG("large circle at end of 1st row");
-	    large_point.x = centers[end_1st_row].x;
-	    large_point.y = centers[end_1st_row].y;
-	    if (usual_ordering)
-	      {  // reversed points
-		for (int i = (int)centers.size() - 1; i >= 0; i--)
-		  {
-		    observation_pts_.push_back(centers[i]);
-		  }
-	      }
-	    else
-	      {  // unusual ordering
-		for (int c = 0; c < temp_cols; c++)
-		  {
-		    for (int r = 0; r < temp_rows; r++)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }  // end unusual ordering
-	  }    // end largest circle at end of 1st row
+        if ((start_last_row_size - start_last_row_n_size) / start_last_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
+        {
+          ROS_DEBUG("large circle at start of last row");
+          large_point.x = centers[start_last_row].x;
+          large_point.y = centers[start_last_row].y;
+          if (usual_ordering)
+          {  // right side up, no rotation, order is natural, starting from upper left, reads like book
+            for (int i = 0; i < (int)centers.size(); i++)
+              observation_pts_.push_back(centers[i]);
+          }
+          else
+          {  // unusual ordering 99 89 87 86...9 then 98 88 78... 8
+            for (int c = temp_cols - 1; c >= 0; c--)
+            {
+              for (int r = temp_rows - 1; r >= 0; r--)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }  // end unusual ordering
+        }    // end largest circle at start
+             // largest circle at end of 1st row
+             //       .....o
+             //       ......
+        else if ((end_1st_row_size - end_1st_row_n_size) / end_1st_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
+        {
+          ROS_DEBUG("large circle at end of 1st row");
+          large_point.x = centers[end_1st_row].x;
+          large_point.y = centers[end_1st_row].y;
+          if (usual_ordering)
+          {  // reversed points
+            for (int i = (int)centers.size() - 1; i >= 0; i--)
+            {
+              observation_pts_.push_back(centers[i]);
+            }
+          }
+          else
+          {  // unusual ordering
+            for (int c = 0; c < temp_cols; c++)
+            {
+              for (int r = 0; r < temp_rows; r++)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }  // end unusual ordering
+        }    // end largest circle at end of 1st row
 
         // largest_circle at end of last row
         //       ......
         //       ....o
-	else if( (end_last_row_size - end_last_row_n_size) / end_last_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
-	  {
-	    ROS_DEBUG("large circle at end of last row");
-	    large_point.x = centers[end_last_row].x;
-	    large_point.y = centers[end_last_row].y;
+        else if ((end_last_row_size - end_last_row_n_size) / end_last_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
+        {
+          ROS_DEBUG("large circle at end of last row");
+          large_point.x = centers[end_last_row].x;
+          large_point.y = centers[end_last_row].y;
 
-	    if (usual_ordering)
-	      {  // 90 80 ... 0, 91 81 ... 1
-		for (int c = 0; c < temp_cols; c++)
-		  {
-		    for (int r = temp_rows - 1; r >= 0; r--)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }  // end normal ordering
-	    else
-	      {  // unusual ordering 9 8 7 .. 0, 19 18 17 10, 29 28
-		for (int r = 0; r < temp_rows; r++)
-		  {
-		    for (int c = temp_cols -1; c >= 0; c--)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }  // end unusual ordering
-	  }    // end large at end of last row
-	  // largest circle at start of first row
-	  // largest_circle at end of last row
-	  //       o.....
-	  //       .......
-	else if((start_1st_row_size - start_1st_row_n_size) / start_1st_row_n_size> MODIFIED_CIRCLE_SIZE_RATIO)
-	  {
-	    ROS_DEBUG("large circle at start of 1st row");
-	    large_point.x = centers[start_1st_row].x;
-	    large_point.y = centers[start_1st_row].y;
-	    if (usual_ordering)
-	      {  // 9 19 29 ... 99, 8 18 ... 98,
-		for (int c = temp_cols - 1; c >= 0; c--)
-		  {
-		    for (int r = 0; r < temp_rows; r++)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }  // end normal ordering
-	    else
-	      {  // unusual ordering  90 91 92 ... 99, 80 81 ... 89
-		for (int r = temp_rows - 1; r >= 0; r--)
-		  {
-		    for (int c = 0; c < temp_cols; c++)
-		      {
-			observation_pts_.push_back(centers[r * temp_cols + c]);
-		      }
-		  }
-	      }
-	  }  // end large at start of 1st row
-	else
-	  {
-	    ROS_ERROR("None of the observed corner circles are bigger than all the others");
-	    successful_find = false;
-	  }
+          if (usual_ordering)
+          {  // 90 80 ... 0, 91 81 ... 1
+            for (int c = 0; c < temp_cols; c++)
+            {
+              for (int r = temp_rows - 1; r >= 0; r--)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }  // end normal ordering
+          else
+          {  // unusual ordering 9 8 7 .. 0, 19 18 17 10, 29 28
+            for (int r = 0; r < temp_rows; r++)
+            {
+              for (int c = temp_cols - 1; c >= 0; c--)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }  // end unusual ordering
+        }    // end large at end of last row
+        // largest circle at start of first row
+        // largest_circle at end of last row
+        //       o.....
+        //       .......
+        else if ((start_1st_row_size - start_1st_row_n_size) / start_1st_row_n_size > MODIFIED_CIRCLE_SIZE_RATIO)
+        {
+          ROS_DEBUG("large circle at start of 1st row");
+          large_point.x = centers[start_1st_row].x;
+          large_point.y = centers[start_1st_row].y;
+          if (usual_ordering)
+          {  // 9 19 29 ... 99, 8 18 ... 98,
+            for (int c = temp_cols - 1; c >= 0; c--)
+            {
+              for (int r = 0; r < temp_rows; r++)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }  // end normal ordering
+          else
+          {  // unusual ordering  90 91 92 ... 99, 80 81 ... 89
+            for (int r = temp_rows - 1; r >= 0; r--)
+            {
+              for (int c = 0; c < temp_cols; c++)
+              {
+                observation_pts_.push_back(centers[r * temp_cols + c]);
+              }
+            }
+          }
+        }  // end large at start of 1st row
+        else
+        {
+          ROS_ERROR("None of the observed corner circles are bigger than all the others");
+          successful_find = false;
+        }
       }
     }
     break;  // end modified circle grid case
-  default:
-    ROS_ERROR_STREAM("target_type does not correlate to a known pattern option ");
-    return false;
-    break;
+    default:
+      ROS_ERROR_STREAM("target_type does not correlate to a known pattern option ");
+      return false;
+      break;
   }  // end of main switch
 
   ROS_DEBUG("Number of keypoints found: %d ", (int)observation_pts_.size());
@@ -552,13 +591,13 @@ int ROSCameraObserver::getObservations(CameraObservations& cam_obs)
     ROS_WARN_STREAM("Pattern not found for pattern: " << pattern_);
     std::vector<cv::KeyPoint> temp_points;
     circle_detector_ptr_->detect(image_roi_, temp_points);
-    for(int i=0;i<temp_points.size(); ++i)
-      {
-	cv::Point p;
-	p.x = temp_points[i].pt.x;
-	p.y = temp_points[i].pt.y;
-	circle(input_bridge_->image, p, 1.0, 255, temp_points[i].size);
-      }
+    for (int i = 0; i < temp_points.size(); ++i)
+    {
+      cv::Point p;
+      p.x = temp_points[i].pt.x;
+      p.y = temp_points[i].pt.y;
+      circle(input_bridge_->image, p, 1.0, 255, temp_points[i].size);
+    }
   }
 
   debug_pub_.publish(input_bridge_->toImageMsg());
@@ -788,7 +827,7 @@ void ROSCameraObserver::dynReConfCallBack(industrial_extrinsic_cal::circle_grid_
   circle_params.filterByArea = config.filter_by_area;
   circle_params.minArea = config.min_area;
   circle_params.maxArea = config.max_area;
-  
+
   circle_params.filterByCircularity = config.filter_by_circularity;
   circle_params.minCircularity = config.min_circularity;
   circle_params.maxCircularity = config.max_circularity;
@@ -837,4 +876,4 @@ bool ROSCameraObserver::checkObservationProclivity(CameraObservations& CO)
   return CameraObserver::checkObservationProclivity(CO);
 }
 
-}  // industrial_extrinsic_cal
+}  // namespace industrial_extrinsic_cal

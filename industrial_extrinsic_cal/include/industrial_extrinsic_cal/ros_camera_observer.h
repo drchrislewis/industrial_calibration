@@ -73,7 +73,8 @@ public:
   /**
    * @brief Default destructor
    */
-  ~ROSCameraObserver(){
+  ~ROSCameraObserver()
+  {
     ROS_ERROR("~CameraObserver");
   };
 
@@ -110,7 +111,16 @@ public:
   bool observationsDone();
 
   /** @brief sets current image and the bridge images whereas the base class just set the last_raw_image_ */
-  void setCurrentImage(const cv::Mat &image);
+  void setCurrentImage(const cv::Mat& image);
+
+  /** @brief starts the subscriber to the image_topic and tries to observe target in each image **/
+  void startTargetTrack();
+
+  /** @brief stops the subscriber to the image_topic, ending the observation of the target with each image **/
+  void stopTargetTrack();
+
+  /** @brief finds observations of the targets in the image **/
+  void imageCB(const sensor_msgs::Image& image);
 
 private:
   /**
@@ -245,6 +255,7 @@ private:
     image_number_ = image_number;
   }
 
+  boost::mutex image_lock_;  // taken before updating the current image and before using it for observations
 
 public:
   /**
@@ -302,11 +313,11 @@ public:
    * @return true of all observations check out
    */
   bool checkObservationProclivity(CameraObservations& CO);
-  
-  bool use_circle_detector_;  
+
+  bool use_circle_detector_;
 
 private:
-  int image_number_;       /**< a counter of images recieved */
+  int image_number_; /**< a counter of images recieved */
   bool white_blobs_;
   ros::ServiceClient client_;
   sensor_msgs::SetCameraInfo srv_;
@@ -314,6 +325,6 @@ private:
   boost::shared_ptr<dynamic_reconfigure::Server<industrial_extrinsic_cal::circle_grid_finderConfig> > server_;
 };
 
-}  // end industrial_extrinsic_cal namespace
+}  // namespace industrial_extrinsic_cal
 
 #endif /* ROS_CAMERA_OBSERVER_H_ */
